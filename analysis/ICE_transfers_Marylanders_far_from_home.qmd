@@ -1,0 +1,697 @@
+---
+title: "ICE_transfers_Marylanders_far_from_home"
+format: html
+editor: visual
+---
+
+# Load libraries
+
+```{r}
+# turn off scientific notation
+options(scipen = 999)
+
+# load proprietary BB Functions
+source('functions/fxns.R')
+
+# load Packages
+library(MASS)
+library(janitor)
+library(sf)
+library(mapview)
+library(readxl)
+library(arrow)
+library(duckdb)
+library(duckspatial)
+library(crsuggest)
+library(tidyverse)
+library(lmPerm)
+
+select <- dplyr::select
+
+```
+
+# Load data
+
+```{r}
+
+# function to read in all excel sheets containing raw, unaltered detentions data 
+read_all_sheets <- function(path, date_cols) {
+  bind_rows(lapply(excel_sheets(path), function(s) {
+    
+    header <- read_xlsx(path, sheet = s, skip = 6, n_max = 0) %>%
+      clean_names() %>%
+      names()
+    
+    if (length(header) == 0) return(NULL)   # silently skip empty sheet
+    
+    col_types <- if_else(header %in% date_cols, "date", "text")
+    
+    read_xlsx(path, sheet = s, skip = 6, col_types = col_types) %>%
+      clean_names()
+  }))
+}
+
+date_cols <- c("bond_posted_date", "arrest_date", "detention_book_in_date_time", "departed_date", 
+               "detention_book_out_date_time", "entry_date", "stay_book_in_date_time", "stay_book_out_date_time")
+
+files <- list.files("data/raw/Hausman_DET_FY2022-FY2026", pattern = "^Hausman_DET_", full.names = TRUE)
+
+detentions_all <- bind_rows(lapply(files, read_all_sheets, date_cols = date_cols)) %>% 
+  rename("anonymized_identifier" = "anonymized_unique_identifier",
+          "book_in_date_time" = "detention_book_in_date_time", 
+          "book_out_date_time" =  "detention_book_out_date_time")
+
+
+# sanity check
+# 10,918 rows missing anonymized id -- matches their processed! 
+detentions_all %>% filter(is.na(anonymized_identifier)) %>% nrow()
+
+
+# ICE data (straight from) that we're using to confirm states w/ active, non-holding-room facilities -2026 
+ice_facilities_26 <- read_csv("data/raw/FY26_detentionStats_04092026_facilities.csv", skip = 9) %>% clean_names()
+
+ice_facilities_25 <- read_csv("data/raw/FY25_detentionStats09242025_facilities.csv", skip = 6) %>% clean_names()
+
+ice_facilities_24 <- read_csv("data/raw/FY24_detentionStats(Facilities EOFY24)_facilities.csv", skip = 6) %>% clean_names()
+
+# facilities shapefile from the vera institute 
+facilities <- read_csv("data/raw/facilities.csv") %>%
+  filter(!is.na(latitude)) %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) 
+
+# facilities file from the deportation data project 
+# it contains some facilities that the vera institute's files are missing, but doesn't include some locations that the vera institute has (due in part to the limited nature of the # of facilities ddp is counting, only those that had 1 person Jan. 2025 onward) -- but we also know that the vera institute file has a couple of erroneous locations, based on some spot-checking. So what we're going to do is take any facilities missing from the DDP file and tack them in from Vera for the most complete join possible 
+facilities_new <- st_read_parquet("data/raw/facilities-latest-082126.parquet") %>% 
+  # no facilities without an address 
+  filter(!is.na(address)) %>%
+  # no facilities with empty geometries 
+  filter(!st_is_empty(geometry)) %>%
+  # adding facility codes based on other ddp data for the facilities missing them 
+  mutate(detention_facility_code = case_when(
+    name == "Midwest Regional Reception Center" ~ "CCALEKS",
+    name == "Wichita County Jail" ~ "WICHTTX", 
+    TRUE ~ detention_facility_code
+  )) %>%
+  select(detention_facility_code, detention_facility_name=name, address, city, county, state, geometry)
+
+# combining the two files, since both have some problems, for the most complete and correct version possible 
+codes_vera <- facilities %>% pull(detention_facility_code)
+codes_ddp <- facilities_new %>% pull(detention_facility_code) 
+
+# codes in facilities (vera) but not in facilities_new (ddp)
+in_fac_old <- setdiff(codes_vera, codes_ddp)
+
+# codes in facilities_new (ddp) but not in facilities (vera)
+in_fac_new <- setdiff(codes_ddp, codes_vera)
+
+codes_vera_to_add <- facilities %>% 
+  filter(detention_facility_code %in% in_fac_old) %>%
+  select(detention_facility_code, detention_facility_name, address, city, county, state, geometry)
+
+
+# this is the new full facilities file we will use 
+facilities_joined <- facilities_new %>% 
+           bind_rows(codes_vera_to_add)
+
+
+# spatial file we created and saved because of time required 
+detentions_us_spatial <- st_read("data/output/detentions_us_spatial_final_0901.gpkg")
+  
+```
+
+# Clean and standardize data
+
+Here, we begin with the raw detentions table we created by binding dataframes above. We drop rows that have no unique person ID, since we can't link them to a particular person or stay. We restrict data to only rows after October 1, 2021, the date the data purports to begin, and remove what we are defining as exact duplicate rows — rows that show the same person being booked into the same facility at the exact same datetime. We group by person identifier and stay book in date time and calculate the number of hours between individual's stints. If the data shows the same person being booked into the same facility within 24 hours of their last bookin to that facility, we consider this duplicated and keep the later-created row. (A note that we most use data Oct. 2022 forward -- after noticing an unusually low number of records in some months of the Fy2022 data, we decided to keep with the Deportation Data Project's practice of looking at FY 23 - present)
+
+We create a variable that tells us whether each person's detention began under the Biden or Trump administration and join in the Vera Institute's compendium of detention facilities using detention facility codes.
+
+Next, we identify cases where a person's final detention record is labeled "Transferred" even though the date they left the facility, the date their overall ICE stay ended, and the date they departed the country all match. Since it's unlikely someone was meaningfully "transferred" if all three of those dates align, we treat these as miscodes and replaces the release reason with the value recorded for the overall stay instead. It's important to note that there are still several cases where someone's stay ends on a row that says "transferred," with no clear sign of a transfer.
+
+Finally, in order to perform spatial data analysis, we restrict the data and filter out the handful of cases that begin in non-us-states (like Puerto Rico, or Guam). We also filter out cases that begin in NA states, and create a version of the data that only uses info from the last year of Biden's administration and the first year of Trump's tenure.
+
+```{r}
+
+detentions_cln <- detentions_all %>%
+  # R displays datetimes in America/New York because that's my system time, but pulls them from underlying UTC. Let's force the underlying data to match what we see onscreen
+  mutate(across(where(is.POSIXct), ~with_tz(.x, tzone = "America/New_York"))) %>%
+  # make clean date fields, minus time
+    mutate(stay_book_in_date = date(stay_book_in_date_time),
+    book_in_date = date(book_in_date_time)) %>% 
+  # Step 1: drop rows with no unique id
+  filter(!is.na(anonymized_identifier)) %>% 
+  # Step 1.25: Drop rows from before where the data purportedly starts
+  filter(stay_book_in_date >= as.Date("2021-10-01")) %>%
+  # Step 1.5: Drop exact duplicate rows (same person, check-in time, and facility).
+  distinct(anonymized_identifier, book_in_date_time, detention_facility, .keep_all=T) %>%
+  # Step 2: Group by person and their overall stay start time, then sort by
+  # individual book-in timestamps so lag() calculations work chronologically.
+  group_by(anonymized_identifier, stay_book_in_date_time) %>%
+  arrange(anonymized_identifier, book_in_date_time) %>%
+  mutate(
+    # Hours elapsed between this book-in and the previous one for the same person/stay.
+    hrs_since_prev_bookin = as.numeric(difftime(book_in_date_time,
+      lag(book_in_date_time), units = "hours")),
+    # Flag: was this book-in within 24 hours of the prior one?
+    within_24hr_flag = !is.na(hrs_since_prev_bookin) & hrs_since_prev_bookin <= 24,
+    # Flag: is this book-in at the same facility as the previous one?
+    same_facility = detention_facility == lag(detention_facility),
+    # Flag: both within 24 hours AND same facility — likely a duplicate transfer entry.
+    within_1day_same_facility_flag = !is.na(hrs_since_prev_bookin) &
+      hrs_since_prev_bookin <= 24 &
+      same_facility) %>%
+  dplyr::select(anonymized_identifier, stay_book_in_date_time, book_in_date_time, stay_book_in_date, book_in_date, everything()) %>%
+  mutate(
+    # For each near-duplicate pair, flag the EARLIER row (the one whose *next* row
+    # is flagged as within_1day_same_facility). lead() looks forward one row.
+    earlier_of_pair_flag = lead(within_1day_same_facility_flag, default = FALSE)
+  ) %>%
+  filter(!earlier_of_pair_flag) %>%
+  ungroup() 
+
+# step 1: all detentions w/ facilities join, plus administration for stay and administration for stint. Stay detention is based on the administration in power when the stay began.
+
+# The way I will count these transfers is grouping by individual stay and admin and counting the number of rows that have the word "transfer." Caveating this with the fact that some people appear to end on a transfer (sometimes that's legit because the data has a cutoff date)
+
+# this dataframe has facilities joined in with the detentions file, and adds columns for admin_detention (administration under which stay began)
+
+detentions_all_fac <- detentions_cln %>%
+  mutate(book_out_date = date(book_out_date_time), .after = "book_out_date_time") %>% 
+  mutate(stay_book_out_date = as.Date(stay_book_out_date_time)) %>% 
+  left_join(facilities_joined, by = "detention_facility_code") %>%
+  mutate(admin_detention = case_when(stay_book_in_date < as_date("2025-01-20") ~ "biden",
+                                  stay_book_in_date >= as_date("2025-01-20") ~ "trump")) 
+
+detentions_all_fac %>% filter(is.na(detention_facility_name)) %>% n_distinct()
+
+detentions_all_fac %>% 
+  group_by(anonymized_identifier, stay_book_in_date_time) %>% 
+  filter(any(is.na(detention_facility_name))) %>%
+  ungroup() %>%
+  nrow()
+
+# after this, there are 576 stays that have at least one row without a location, or 1643 total rows that will be kicked out for spatial analysis. That's less than 1% of the total # of rows we're working with. 
+
+# okay, there are some miscodes in this data that we are aware of. We won't be able to fix them all, but maybe some. There's one in particular I'm attempting to fix: rows that should say 'removed' but say 'transferred' instead. Let's start by finding those:
+miscoded_transfers <- detentions_all_fac %>%
+  # group by anonymized identifier and stay book in date 
+  group_by(anonymized_identifier, stay_book_in_date) %>%
+  slice_max(book_in_date_time, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  filter(
+    detention_release_reason == "Transferred",
+    stay_book_out_date == as.Date(departed_date) & stay_book_out_date == as.Date(book_out_date)
+  )
+
+miscoded_transfers %>% 
+  select(anonymized_identifier, departed_date, stay_book_out_date, stay_book_out_date_time, book_out_date_time, everything()) 
+
+# alright, now we've found and spot checked them. Let's fix them. What we're defining as miscodes: times when the very last row in a person's detention history is coded as a transfer, but their book out date from that facility matches their overall stay book out date and their departure date, indicating that their stay with ICE ended on the same day as they departed the nation, we'll replace the value currently in their "detention_release_reason" with the value in their "stay_release_reason." For four or five people, this is still "transferred", but those numbers shouldn't impact this overall measure to help remove error. our reasoning is that it is highly unlinkely that someone was transferred outside of ICE control or to another ICE facility for a meaningful amount of time if their stay in their last facility, their stay with ICE and their stay in the nation all ended on the same day.  
+
+detentions_all_fac <- detentions_all_fac %>%
+  group_by(anonymized_identifier, stay_book_in_date) %>%
+  mutate(
+    is_first_row = row_number() == min(row_number()),
+    is_last_row = row_number() == max(row_number())) %>%
+  ungroup() %>%
+  mutate(
+    miscode_flag = 
+      # must be the last row of the group
+      is_last_row &
+      # detention_release_reason must equal transferred
+      detention_release_reason == "Transferred" &
+      #stay book out date must equal departed date 
+      stay_book_out_date == as.Date(departed_date) &
+      # stay book out date must equal book out date 
+      stay_book_out_date == as.Date(book_out_date)
+  ) %>%
+  mutate(
+    detention_release_reason_cln = case_when(
+      miscode_flag ~ stay_release_reason,  # or whatever col you want to pull from
+      TRUE ~ detention_release_reason
+    ), .after = 'detention_release_reason'
+  )
+
+# Final step, mostly for us to do spatial calculations using projection systems that account for the US + Hawaii only: let's filter out the handful of folks who did not start in a 
+# US state. 
+
+no_list <- c("GU", "MP", "VI", "PR")
+
+detentions_all_fac_grouped <- detentions_all_fac %>%
+  group_by(anonymized_identifier, stay_book_in_date_time) %>% 
+  arrange(anonymized_identifier, book_in_date_time) %>% 
+  slice_min(book_in_date_time, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  # no states that are not in the contiguous us 
+  filter(state %notin% no_list) %>%
+  # no starting in states we can't identify 
+  filter(!is.na(state)) 
+
+# this data has one row per person who started their detention in a US state. 
+detentions_all_fac_cln <- detentions_all_fac_grouped %>% 
+  select(anonymized_identifier, stay_book_in_date_time) %>% 
+  left_join(detentions_all_fac, by = c("anonymized_identifier", "stay_book_in_date_time"))
+
+# let's keep track of all the ids and stay book in date times of people who have a stop we can't geocode
+# before we do distance calculations, we'll have to kick these people out of the data
+# looks like 27 stays remain of the 576 we identified. These folks will leave us when we create our spatial dataframe in the next step! 
+no_location <- detentions_all_fac_cln %>%
+  filter(is.na(detention_facility_name)) %>%
+  distinct(anonymized_identifier, stay_book_in_date_time)
+
+```
+
+# Creating spatial data
+
+A spatial dataframe is pre-loaded because of the amount of time and memory resources this distance calculation requires. Providing the code here for transparency, in case anybody would like to undertake their own distance calculations.
+
+```{r}
+
+# detentions_us_spatial <- detentions_all_fac_cln %>%
+#   # getting number miles from first to next stop, etc.
+#   st_as_sf() %>%
+#   st_transform(5070) %>%
+#   # group by person and stay
+#   group_by(anonymized_identifier, stay_book_in_date_time) %>%
+#   # # arrange stints within stay
+#   arrange(anonymized_identifier, book_in_date_time) %>%
+#   # # take distance of one stint to the next
+#   mutate(
+#     geom_next = lead(geometry),
+#   )%>%
+#   ungroup()
+# 
+# # turn distance into a vector to make this run faster
+# detentions_us_spatial$distance_m <- st_distance(
+#   detentions_us_spatial$geometry,
+#   detentions_us_spatial$geom_next,
+#   by_element = TRUE
+# )
+# 
+# # multiply and turn into miles
+# detentions_us_spatial$distance_miles <- as.numeric(detentions_us_spatial$distance_m) * 0.000621371
+# # make sure all NAs are zeros
+# detentions_us_spatial$distance_miles[is.na(detentions_us_spatial$distance_miles)] <- 0
+# 
+# detentions_us_spatial_write <- detentions_us_spatial %>%
+#   select(-geom_next) %>%
+#   # removing the remaining folks who have a stint without a location
+#   anti_join(
+#     no_location,
+#     by = c("anonymized_identifier", "stay_book_in_date_time")
+#   )
+# 
+# st_write(detentions_us_spatial_write, "data/output/detentions_us_spatial_final_0916.gpkg")
+
+```
+
+# Sentence 1
+
+**Maryland residents are transported across greater distances than those arrested in most other states. A Banner analysis of ICE records found that a person first detained in Maryland is typically transferred more than 1,200 miles, roughly the driving distance between Baltimore and southern Louisiana.**
+
+```{r}
+
+first_states_natl <- detentions_us_spatial %>%
+  st_drop_geometry() %>% 
+  # filter so we're looking at the current administration only 
+  filter(stay_book_in_date >= as_date("2025-01-20")) %>%
+  group_by(anonymized_identifier, stay_book_in_date_time) %>%
+  arrange(anonymized_identifier, book_in_date_time) %>%
+  mutate(
+    first_detention_state = first(state)
+  ) %>%
+  ungroup()
+
+
+first_states_natl_grpd <- first_states_natl %>%
+  # group by stay 
+  group_by(anonymized_identifier, stay_book_in_date_time, first_detention_state)  %>%
+  summarise(
+        n_miles = sum(distance_miles, na.rm = T)
+        ) %>%
+  ungroup() 
+
+first_states_natl_grpd %>%
+  group_by(first_detention_state) %>%
+  summarize(
+    mean_distance = mean(n_miles), 
+    median_miles = median(n_miles)
+  ) %>%
+  arrange(desc(median_miles)) %>% View()
+
+# determination of driving distance was made using google maps, Baltimore to New Orleans
+
+```
+
+# Sentence 2
+
+**In the final year of the Biden administration, about a third of immigrants detained in Maryland were never transferred out of state, with many granted a supervised release.**
+
+```{r}
+
+# step 1: make a df with one row per person first detained in Maryland with space 
+ maryland_detentions_miles <- detentions_us_spatial %>%
+  st_drop_geometry() %>% 
+  group_by(anonymized_identifier, stay_book_in_date_time) %>%
+  arrange(anonymized_identifier, book_in_date_time) %>% 
+  filter(first(detention_facility_code) %in% c("BALHOLD", "SALHOLD")) %>%
+  ungroup()
+
+never_transf_biden <- maryland_detentions_miles %>%
+  # filter to last year of Biden
+  filter(stay_book_in_date >= as_date("2024-01-20") & stay_book_in_date <= as_date("2025-01-19")) %>%
+  group_by(anonymized_identifier, stay_book_in_date_time, stay_release_reason) %>% 
+  arrange(anonymized_identifier, book_in_date_time) %>%
+  summarize(
+    non_md_flag = any(state != "MD"), 
+    first_non_md_state = state[state != "MD"][1], 
+    total_distance = sum(distance_miles)
+  ) %>% 
+  ungroup()
+
+never_transf_biden %>% 
+  mutate(total_detained = n()) %>% 
+  group_by(non_md_flag,total_detained) %>% 
+  count() %>% 
+  mutate(share_total = (n/total_detained)*100)
+  
+
+never_transf_biden %>% filter(non_md_flag == F) %>% group_by(stay_release_reason) %>% count() %>% arrange(desc(n))
+
+```
+
+# Sentence 3
+
+**The remaining two-thirds were transferred out of state. But of that group, the vast majority — more than 4 out of 5 — were moved to neighboring Pennsylvania and Virginia.**
+
+```{r}
+
+never_transf_biden %>% 
+  filter(non_md_flag == T) %>% 
+  mutate(total_transferred = n()) %>%
+  group_by(first_non_md_state, total_transferred) %>%
+  count() %>% 
+  mutate(share_tostate = (n/total_transferred)*100) %>%
+  arrange(desc(share_tostate))
+  
+```
+
+# Sentence 4
+
+**During Trump’s second administration, ICE has detained more than 8,300 people in Maryland — six times more than the agency detained during any similar period since at least 2022.**
+
+```{r}
+
+# step 1: df that is one row per person who has been detained in Maryland
+maryland_detained <- detentions_all_fac_cln %>%
+  group_by(anonymized_identifier, stay_book_in_date_time) %>% 
+  arrange(anonymized_identifier, book_in_date_time) %>% 
+  slice_min(book_in_date_time, n = 1, with_ties = FALSE) %>%
+  ungroup() %>% 
+  filter(detention_facility_code %in% c("BALHOLD", "SALHOLD"))
+
+# step 2: total number of people detained in Maryland under Trump
+maryland_detained %>%
+  filter(admin_detention == "trump") %>%
+  select(anonymized_identifier, stay_book_in_date, stay_book_out_date) %>%
+  nrow()
+
+# step 3: total number of people detained under biden since Oct 1, 2022  
+biden_alone <- maryland_detained %>%
+  filter(admin_detention == "biden") %>%
+  filter(stay_book_in_date >= as_date("2022-10-01")) %>% 
+  select(anonymized_identifier, stay_book_in_date, stay_book_out_date)
+
+
+# step 1.5: get count of detentions 
+daily_counts <- biden_alone %>%
+  count(stay_book_in_date, name = "n_detentions") 
+
+# Step 2: build a full sequence of every calendar day in the range
+full_date_range <- seq(min(daily_counts$stay_book_in_date),
+                        max(daily_counts$stay_book_in_date),
+                        by = "day")
+
+# Step 3: fill in any missing days with 0 arrests
+daily_counts_cln <- daily_counts %>%
+  complete(stay_book_in_date = full_date_range,
+           fill = list(n_detentions = 0))
+
+# step 4: arrange such that the dates are in chron order 
+daily_counts_cln_2  <- daily_counts_cln %>%
+  arrange(stay_book_in_date)
+
+# step 5: apply slide function from slider package that sums the n_arrests column for each day and the 562 days before it (a 563 day window) on a rolling basis (This is the size of the window between Jan 1, 2025 and August 6, 2026 -- the duration of the trump administration through the cutoff of this data). The complete = TRUE argument ensures that we only start counting arrests together when we've hit our first 563 day window (as opposed to getting first a count of one day, then two, then three, all the way up through 563 at which point we'll only see 563)
+daily_counts_cln_3 <- daily_counts_cln_2 %>%
+  mutate(rolling_562day = slide_dbl(n_detentions, sum, .before = 562, .complete = TRUE)) %>%
+  arrange(desc(rolling_562day))
+
+```
+
+# Sentence 5
+
+**Today, 94% of Maryland detainees are transferred out of state, and roughly 1 in 5 are moved to neighboring states.**
+
+```{r}
+
+trump_transfers <- maryland_detentions_miles %>% 
+  filter(admin_detention =="trump") %>%
+  group_by(anonymized_identifier, stay_book_in_date_time) %>% 
+  arrange(anonymized_identifier, book_in_date_time) %>%
+  summarize(
+    non_md_flag = any(state != "MD"), 
+    first_non_md_state = state[state != "MD"][1], 
+    total_distance = sum(distance_miles)
+  ) %>% 
+  ungroup()
+
+trump_transfers %>% 
+  mutate(total_detained = n()) %>% 
+  group_by(non_md_flag,total_detained) %>% 
+  count() %>% 
+  mutate(share_total = (n/total_detained)*100)
+
+trump_transfers %>% 
+  filter(non_md_flag == T) %>% 
+  mutate(total_transferred = n()) %>%
+  group_by(first_non_md_state, total_transferred) %>%
+  count() %>% 
+  ungroup() %>% 
+  mutate(is_neighboring_state = first_non_md_state %in% c("PA", "VA", "WV")) %>%
+  group_by(is_neighboring_state, total_transferred) %>%
+  summarize(transferred = sum(n)) %>%
+  mutate(share_thisdistance = (transferred/total_transferred)*100)
+
+```
+
+# Sentence 6
+
+**Maryland is not alone. Four other states also have no long-term detention facilities.**
+
+First, what do we mean by "no long term facility"? We're talking states that only have hold rooms or short term facilities without beds — places designed to hold people for less than 24 hours. "Facilities" can include hold rooms, dedicated federal detention facilities, and jails and prisons that ICE and other federal agencies contract with.
+
+How we're determining this:
+
+-   First, we eliminate any state that has a facility present in 3 years' worth of detention management statistics (the three years that cover Biden's final year and trump's first). We know this list does not include:
+
+    -   hold rooms — we do not count this as a long-term detention facility
+
+    -   staging facilities - we do not count these as long-term detention facilities
+
+    -   Some jails, though it's not clear why many jails appear on the agency's website and other do not - these often count as long term facilities
+
+Next, we take the states that don't show up in the ICE data or don't show up every year and look for at least one IGA or IGSA contract:
+
+AK (shows as in none): https://www.ice.gov/detain/detention-facilities/anchorage-correctional-complex -- listed among ICE detention facilities online, and IGA shows that it has had multiple jail contracts going for bedspace for ICE detainees since at least 1996.
+
+WV (not in 26 but in 24): https://www.ice.gov/doclib/foia/odo-compliance-inspections/SouthCentralRegJail_CharlestonWV_03032026.pdf, shows up in '24 and '25 data.
+
+ME (not in 26 but in 24): https://www.ice.gov/detention-facilities?state=15&office=&name= -- listed among ICE detention facilities online, shows up in the data in '25 and '24.
+
+MT (not in 24 but in 26): https://montanafreepress.org/2025/07/25/in-cascade-county-immigration-detention-is-a-revenue-generator-for-the-jail/ "According to those officials, a contract approved in 2021 with the U.S. Marshals Service obligates Cascade County to house those detainees."
+
+ID (not in 24 but in 26): https://www.ice.gov/doclib/foia/odo-compliance-inspections/elmoreCoJail_MountainHomeID_Aug20-22_2024.pdf "The ICE Office of Enforcement and Removal Operations (ERO) began housing detainees at ECJ in 2009..."
+
+MO (not in 24 but in 26): https://www.ice.gov/doclib/foia/odo-compliance-inspections/2014LincolnCounty.pdf and https://www.ice.gov/doclib/foia/detFacContracts/ACD996063_P00010_LincolnCo_IGSA_TroyMD.pdf -- seemingly had a long term facility in lincoln up through November of '24, and then a long term facility at Greene county jail starting in feb '25. There is a two month-ish gap, but we're going to continue to count it as a place with long-term detention beds because for the majority of the time we are considering, it had a long-term facility.
+
+ND (not in 24 but in 26): https://www.ice.gov/doclib/foia/odo-compliance-inspections/grandForksCoCorrFac_GrandForksND_Jul9-11_2024.pdf
+
+SD (not in 24 but in 26): https://www.ice.gov/doclib/foia/isa/penningtoncountyjailsd-igsa011-05.pdf -- has been detaining people at pennington county since at least jan 2024
+
+WY (not in 24 but in 26): https://www.ice.gov/doclib/foia/odo-compliance-inspections/NatronaCoJail_CasperWY_Jul31_2025.pdf -- ICE ERO began housing people at NCJ in 1991
+
+States we're pretty sure there are only have short-term facilities (staging or hold rooms):
+
+-   Maryland (has a law)
+
+<!-- -->
+
+-   Oregon (has a law)
+
+<!-- -->
+
+-    Delaware - only the hold room
+
+<!-- -->
+
+-   Illinois (staging, has a law ) -- https://immigrantjustice.org/press-release/new-state-law-takes-effect-to-end-ice-detention-in-illinois/ - -
+
+<!-- -->
+
+-   Connecticut -- https://ctmirror.org/2025/08/28/ct-ice-arrests-deportations/ "Since ICE has no detention centers in Connecticut, people arrested by ICE in Connecticut are swiftly moved through detention centers across the nation..."
+
+```{r}
+
+# step 1: make a list of states that have long-term detention facilities, and those that do not
+
+# start with all states 
+all_states <- state.abb
+
+# states with active ice facilities 2026  
+ice_26 <- ice_facilities_26 %>%
+  group_by(state) %>% 
+  count() %>%
+  pull(state)
+
+# states with active ice facilities 2025
+ice_25 <- ice_facilities_25 %>%
+  group_by(state) %>% 
+  count() %>%
+  pull(state)
+
+# states with active ice facilities 2024 
+ice_24 <- ice_facilities_24 %>%
+  group_by(state) %>% 
+  count() %>%
+  pull(state)
+
+# states in all 3
+in_all_3 <- Reduce(intersect, list(ice_26, ice_25, ice_24))
+
+# states in any list 
+in_any <- unique(c(ice_26, ice_25, ice_24))
+
+# states in no list 
+in_none <- setdiff(all_states, in_any)
+
+# states in 24 but not in 26
+in_24_not_26 <- setdiff(ice_24, ice_26)
+
+# states in 26 but not in 24 
+in_26_not_24 <- setdiff(ice_26, ice_24)
+
+# using the research outlined above, we create the following:
+# all "in_any" states have detention facilities 24-26 
+states_w_detention <- in_any
+
+# taking diff between list of states with detention facilities and those that don't have any 
+states_not_in_ice_lst <- setdiff(all_states, in_any)
+
+# alaska is the only state that has detention that isn't in "in_any"
+states_with_identified_detention <- c("AK")
+
+# make a list of short term
+states_with_short_term <- c("MD", "OR", "DE", "IL", "CT")
+
+# includes guam, pr, MP, VI, but those will get filtered out because we took them out of our data 
+states_w_detention_all <- c(states_w_detention, states_with_identified_detention) 
+
+```
+
+# Sentence 7
+
+**Over the last two years, under both Biden and Trump, people in those five states were transferred more often and moved a median distance roughly seven times that of people who started in states with a long-term detention facility.**
+
+```{r}
+
+detentions_us_spatial_admin <- detentions_us_spatial %>%
+  filter(stay_book_in_date >= as_date("2024-01-20") & stay_book_in_date <= as_date("2026-01-19"))
+
+first_states <- detentions_us_spatial_admin %>%
+  group_by(anonymized_identifier, stay_book_in_date_time) %>%
+  arrange(anonymized_identifier, book_in_date_time) %>%
+  mutate(
+    first_detention_state = first(state),
+    detention_bucket = case_when(
+      first_detention_state %in% states_w_detention_all   ~ "has_lt",
+      first_detention_state %in% states_with_short_term    ~ "st_only",
+      TRUE                                    ~ "other"
+    )
+  ) %>%
+  ungroup()
+
+regression_df <- first_states %>%
+  st_drop_geometry() %>% 
+  group_by(anonymized_identifier, stay_book_in_date_time, first_detention_state, detention_bucket, admin_detention)   %>%
+  summarise(
+        n_rows = n(),
+        n_transfers = sum(detention_release_reason_cln == "Transferred", na.rm = TRUE),
+        n_miles = sum(distance_miles, na.rm = T)
+       ) %>%
+  ungroup() 
+
+regression_df %>% 
+  group_by(detention_bucket) %>% 
+  summarize(
+    n_zero = sum(n_miles == 0),
+    n_nonzero = sum(n_miles > 0),
+    total = n(), 
+    mean = mean(n_miles, na.rm = TRUE),
+    median = median(n_miles, na.rm = TRUE)
+  ) 
+
+```
+
+To confirm what our medians were telling us — and to ensure we could separate out the effect of administration from the effect of short term vs. long term facility state — we fit an "additive" linear regression predicting log-transformed miles traveled from two categorical predictors: detention_bucket (has_lt vs. st_only) and admin_detention (biden vs. trump). "Additive" means the model assumes the effect of administration on distance traveled is the same regardless of detention bucket (no interaction term) ; each predictor contributes independently to the predicted log-miles.
+
+Because n_miles is heavily right-skewed (a small number of people travel very, very long distances, a significant chunk travel not at all or little), we create a log_miles variable (log(n_miles + 1)) to make the distribution more symmetric and workable for linear regression. The +1 avoids taking the log of zero for people who weren't transferred at all.
+
+detention_bucketst_only: This is the effect of being in the "st_only" bucket relative to "has_lt", holding administration constant. Since the outcome is log-transformed, this coefficient means people whose first stop was a short-term-only state traveled exp(1.77) = 5.87, or ≈ 6 times as many miles as those in has_lt states, on average.
+
+```{r}
+
+regression_df <- regression_df %>%
+  mutate(log_miles = log(n_miles + 1))
+
+hist(regression_df$log_miles)
+
+
+# model
+model_miles_add <- lm(log_miles ~ detention_bucket + admin_detention, 
+                      data = regression_df)
+summary(model_miles_add)
+
+```
+
+# Sentence 8
+
+**More than 3,000 Marylanders were transferred first to Louisiana during Trump’s second term.**
+
+```{r}
+
+trump_transfers %>% 
+  filter(non_md_flag == T) %>% 
+  mutate(total_transferred = n()) %>%
+  group_by(first_non_md_state, total_transferred) %>%
+  count() %>%
+  arrange(desc(n))
+
+
+```
+
+# Sentence 9
+
+**A man from Pakistan now in his early 40s was arrested in Maryland and initially processed and detained in Baltimore last April, ICE records show. Days later, the man, who is not identified in records, was transferred to a long-term detention facility in central Pennsylvania, where he stayed for nearly three months.**
+
+**Then he was moved 17 more times in less than a year. Three of those trips brought him back to the same Pennsylvania facility.**
+
+**By the time he was conditionally released this summer, ICE had moved him 11,347 miles — more distance than four trips between San Francisco and New York City.**
+
+```{r}
+
+man_18_stops <- detentions_us_spatial %>% 
+  filter(anonymized_identifier == "f28050b1b43e2a0599964363e8e61a4a32e9515d") %>%
+  select(anonymized_identifier, stay_book_in_date_time, book_in_date_time, detention_facility, book_out_date_time, gender, citizenship_country, birth_year, detention_facility_name, address, state, distance_miles, geometry = geom) 
+
+sum(man_18_stops$distance_miles)
+
+```

@@ -1,0 +1,27 @@
+---
+title: "ICE_transfers_Marylanders_far_from_home"
+format: html
+editor: visual
+---
+
+# Fact Check for ICE_transfers_Marylanders_far_from_home
+
+
+# Setup
+```{r}
+# turn off scientific notation
+options(scipen = 999)
+
+# load proprietary BB Functions
+source('functions/fxns.R')
+
+# load Packages
+library(tidyverse)
+```
+
+Sentence goes here...
+```{r}
+# Code that produces the sentence goes here...
+
+
+```
