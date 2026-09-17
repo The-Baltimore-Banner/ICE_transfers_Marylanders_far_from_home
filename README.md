@@ -66,7 +66,7 @@ We began with a simple evaluation of the median distance traveled by those who s
 
 To further confirm our findings and control for administration, we fit a linear regression model predicting distance traveled from two factors: the type of state where a person was first detained (short-term-only vs. has long-term), and which administration was in power when their detention began (Biden vs. Trump).
 
-Because miles traveled is heavily right-skewed — most people travel between 0 and a few thousand miles, but a small number travel tens of thousands of miles — we log-transformed the outcome before modeling (adding 1 before taking the log to handle cases where a person was never transferred and traveled zero miles). This makes the distribution more symmetric and the model results more interpretable. We included everyone that had never been transferred because we felt that
+Because miles traveled is heavily right-skewed — most people travel between 0 and a few thousand miles, but a small number travel tens of thousands of miles — we log-transformed the outcome before modeling (adding 1 before taking the log to handle cases where a person was never transferred and traveled zero miles). This makes the distribution more symmetric and the model results more interpretable. 
 
 We also tested a version of the model that included an interaction between facility type and administration, but found the interaction term was not statistically significant. We therefore used an additive model, which assumes the effect of administration is consistent across both facility types.
 
