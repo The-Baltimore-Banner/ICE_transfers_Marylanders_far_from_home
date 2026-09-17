@@ -10,7 +10,7 @@
 
 <a id="overview"></a>
 
-## Overview {#overview}
+## Overview
 
 Under President Donald Trump’s unprecedented deportation campaign, ICE has transferred detained immigrants all over the country, moving them thousands of miles from loved ones and legal representatives.
 
@@ -24,7 +24,7 @@ Read the story here.
 
 <a id="data"></a>
 
-## Data {#data}
+## Data
 
 Download the data folder for this project [here](https://ice-transfers-marylanders-far-from-home.s3.us-east-1.amazonaws.com/data.zip). Make sure you put it in the root directory of this repo and unzip it. This folder contains many of the pieces you'll need to re-create the analysis from scratch, as well as the results from our work. You'll need to allocate about 3.24 GB of hard drive space for this folder. Here's a table explaining what it contains.
 
@@ -74,7 +74,7 @@ The model's coefficient for short-term-only states can be interpreted as: People
 
 <a id="limitations"></a>
 
-## Limitations {#limitations}
+## Limitations 
 
 -   **We calculated straight-line distances only:** We measured distance as the crow flies between facility coordinates — not actual travel routes. Real travel distances would likely be longer.
 
@@ -88,7 +88,7 @@ The model's coefficient for short-term-only states can be interpreted as: People
 
 <a id="license"></a>
 
-## License {#license}
+## License 
 
 Copyright 2026, The Venetoulis Institute for Local Journalism
 
