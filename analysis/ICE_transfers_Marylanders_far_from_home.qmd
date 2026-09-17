@@ -252,36 +252,36 @@ A spatial dataframe is pre-loaded because of the amount of time and memory resou
 
 ```{r}
 
-detentions_us_spatial <- detentions_all_fac_cln %>%
-  # getting number miles from first to next stop, etc.
-  st_as_sf() %>%
-  st_transform(5070) %>%
-  # group by person and stay
-  group_by(anonymized_identifier, stay_book_in_date_time) %>%
-  # # arrange stints within stay
-  arrange(anonymized_identifier, book_in_date_time) %>%
-  # # take distance of one stint to the next
-  mutate(
-    geom_next = lead(geometry),
-  )%>%
-  ungroup()
-
-# turn distance into a vector to make this run faster
-detentions_us_spatial$distance_m <- st_distance(
-  detentions_us_spatial$geometry,
-  detentions_us_spatial$geom_next,
-  by_element = TRUE
-)
-
-# multiply and turn into miles
-detentions_us_spatial$distance_miles <- as.numeric(detentions_us_spatial$distance_m) * 0.000621371
-# make sure all NAs are zeros
-detentions_us_spatial$distance_miles[is.na(detentions_us_spatial$distance_miles)] <- 0
-
-detentions_us_spatial_write <- detentions_us_spatial %>%
-  select(-geom_next)
-
-st_write(detentions_us_spatial_write, "data/output/detentions_us_spatial_final_0916.gpkg")
+# detentions_us_spatial <- detentions_all_fac_cln %>%
+#   # getting number miles from first to next stop, etc.
+#   st_as_sf() %>%
+#   st_transform(5070) %>%
+#   # group by person and stay
+#   group_by(anonymized_identifier, stay_book_in_date_time) %>%
+#   # # arrange stints within stay
+#   arrange(anonymized_identifier, book_in_date_time) %>%
+#   # # take distance of one stint to the next
+#   mutate(
+#     geom_next = lead(geometry),
+#   )%>%
+#   ungroup()
+# 
+# # turn distance into a vector to make this run faster
+# detentions_us_spatial$distance_m <- st_distance(
+#   detentions_us_spatial$geometry,
+#   detentions_us_spatial$geom_next,
+#   by_element = TRUE
+# )
+# 
+# # multiply and turn into miles
+# detentions_us_spatial$distance_miles <- as.numeric(detentions_us_spatial$distance_m) * 0.000621371
+# # make sure all NAs are zeros
+# detentions_us_spatial$distance_miles[is.na(detentions_us_spatial$distance_miles)] <- 0
+# 
+# detentions_us_spatial_write <- detentions_us_spatial %>%
+#   select(-geom_next)
+# 
+# st_write(detentions_us_spatial_write, "data/output/detentions_us_spatial_final_0916.gpkg")
 
 ```
 
