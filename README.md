@@ -1,6 +1,6 @@
 # How ICE transfers detained Marylanders
 
-### by [Sahana Jayaraman and Danny Zawodny](mailto:sahana.jayaraman@thebaltimorebanner.com)
+### By [Sahana Jayaraman and Danny Zawodny](mailto:sahana.jayaraman@thebaltimorebanner.com)
 
 -   [Overview](#overview)
 -   [Data](#data)
@@ -10,13 +10,13 @@
 
 <a id="overview"></a>
 
-## Overview 
+## Overview {#overview}
 
 Under President Donald Trump’s unprecedented deportation campaign, ICE has transferred detained immigrants all over the country, moving them thousands of miles from loved ones and legal representatives.
 
-For those detained in Maryland,out-of-state transfers to facilities in Pennsylvania and Virginia have been common since 2021, when the state outlawed the use of local jail and prison beds for ICE detention.
+For those detained in Maryland, out-of-state transfers to facilities in Pennsylvania and Virginia have been common since 2021, when the state outlawed the use of local jail and prison beds for ICE detention.
 
-But lawyers told us their clients were now moving much further away, introducing new logistical and legal hurdles to their cases. Those detained said the extra distance from family exacts a deep psychological toll.
+But lawyers told us their clients were now moving much farther away, introducing new logistical and legal hurdles to their cases. Those detained said the extra distance from family exacts a deep psychological toll.
 
 To measure how much the surge in ICE activity has changed immigration detention in Maryland — and the lives of thousands who have passed through — we tracked the journeys of each person detained by ICE since October 2021, calculating the number of times they were transferred and how many miles they moved. We looked at how far ICE moved the typical detained Marylander under different administrations, and whether they go farther than people first held in other states. 
 
@@ -24,19 +24,19 @@ Read the story here.
 
 <a id="data"></a>
 
-## Data 
+## Data {#data}
 
-Download the data folder for this project [here](https://ice-transfers-marylanders-far-from-home.s3.us-east-1.amazonaws.com/data.zip). Make sure that you put it in the root directory of this repo and unzip it. This folder contains many of the pieces that you'll need to recreate the analysis from scratch, as well as the results from our work. You'll need to allocate about 3.24 GB of hard drive space for this folder. Here's a table explaining what it contains.
+Download the data folder for this project [here](https://ice-transfers-marylanders-far-from-home.s3.us-east-1.amazonaws.com/data.zip). Make sure you put it in the root directory of this repo and unzip it. This folder contains many of the pieces you'll need to re-create the analysis from scratch, as well as the results from our work. You'll need to allocate about 3.24 GB of hard drive space for this folder. Here's a table explaining what it contains.
 
 | File | Contents | Source |
 |------------------------|------------------------|------------------------|
-| `Hausman_DET_FY2022-FY2026` | Each .xlsx file in this folder has Individual-level ICE detention records for fiscal years 2022 –2026, one row per person per facility stay. Includes anonymized person ID, facility code, book-in/book-out timestamps and more. | Obtained via FOIA request; released August 25, 2026, through the Deportation Data Project |
-| `FY24_detentionStats(Facilities EOFY24)_facilities.csv` | ICE detention facility statistics at end of fiscal year 2024: facility name, state, and bed/usage counts. | ICE detention statistics page |
+| `Hausman_DET_FY2022-FY2026` | Each .xlsx file in this folder has individual-level ICE detention records for fiscal years 2022 – 26, one row per person per facility stay. Includes anonymized person ID, facility code, book-in/book-out timestamps and more. | Obtained via FOIA request; released Aug. 25, 2026, through the Deportation Data Project |
+| `FY24_detentionStats(Facilities EOFY24)_facilities.csv` | ICE detention facility statistics at end of fiscal year 2024: facility name, state and bed/usage counts. | ICE detention statistics page |
 | `FY25_detentionStats09242025_facilities.csv` | Same facility-level statistics, as of 2025 | ICE detention statistics page |
 | `FY26_detentionStats_04092026_facilities.csv` | Same facility-level statistics, as of 2026 | ICE detention statistics page |
 | `facilities.csv` | Directory of ICE detention facilities with addresses and latitude/longitude coordinates. | Vera Institute of Justice |
-| `facilities-latest-082126.parquet` | Directory of ICE detention facilities with addresses and latitude/longitude coordinates | Deportation Data Project |
-| `detentions_us_spatial_final_0901.gpkg` | Pre-computed spatial dataset derived from the detention records above, with each row containing the detention facility's geographic coordinates and the straight-line distance (in miles) to the next facility in the same person's detention stay. Stored as a GeoPackage to preserve spatial geometry. | Generated by The Baltimore Banner from the above sources |
+| `facilities-latest-082126.parquet` | Directory of ICE detention facilities with addresses and latitude/longitude coordinates. | Deportation Data Project |
+| `detentions_us_spatial_final_0916.gpkg` | Pre-computed spatial data set derived from the detention records above, with each row containing the detention facility's geographic coordinates and the straight-line distance (in miles) to the next facility in the same person's detention stay. Stored as a GeoPackage to preserve spatial geometry. | Generated by The Baltimore Banner from the above sources |
 
 <a id="method"></a>
 
@@ -46,19 +46,19 @@ Download the data folder for this project [here](https://ice-transfers-marylande
 
 We calculated how far people traveled between detention facilities using straight-line ("as the crow flies") distances.
 
-Each facility's address was assigned geographic point using coordinates from a combination the of The Deportation Data Project's most up-to-date facilities list — which includes every facility in which at least one detainee was held since January 1, 2025, along with newly-opened facilities — and a list maintained by the Vera Institute of Justice. We then re-projected our points from a geographic CRS (WGS84, which uses latitude/longitude in degrees) into a projected CRS (which uses linear units; in our case, meters) to calculate the distance between consecutive facilities in a person's detention stay. We used the (`st_distance()`) function from R's `sf` package, which returns distances in meters; we converted those to miles.
+Each facility's address was assigned a geographic point using coordinates from a combination the of the Deportation Data Project's most up-to-date facilities list — which includes every facility in which at least one detainee was held since Jan. 1, 2025, along with newly-opened facilities — and a list maintained by the Vera Institute of Justice. We then re-projected our points from a geographic CRS (WGS84, which uses latitude/longitude in degrees) into a projected CRS (which uses linear units; in our case, meters) to calculate the distance between consecutive facilities in a person's detention stay. We used the (`st_distance()`) function from R's `sf` package, which returns distances in meters; we converted those to miles.
 
-Because the spatial calculations are computationally intensive, results are saved in a pre-computed GeoPackage file (`detentions_us_spatial_final_0520.gpkg`) and loaded from there. The full calculation code is commented out but preserved in the notebook for transparency.
+Because the spatial calculations are computationally intensive, results are saved in a pre-computed GeoPackage file (`detentions_us_spatial_final_0916.gpkg`) and loaded from there. The full calculation code is commented out but preserved in the notebook for transparency.
 
 To get a single distance figure for each person's total detention stay, we summed the individual leg distances.
 
 ### Identifying states without long-term detention facilities
 
-Maryland lacks a long-term immigration detention facility, meaning ICE is limited to hold rooms and short-term processing facilities — places designed to hold detainees for less than 24 hours. To find other states without long-term facilities, we used facility type definitions supplied by TRAC.
+Maryland lacks a long-term immigration detention facility, meaning ICE is limited to hold rooms and short-term processing facilities — places designed to hold detainees for less than 24 hours. To find other states without long-term facilities, we used facility-type definitions supplied by TRAC.
 
-We cross-referenced three years of ICE detention facility statistics (FY2024, FY2025, and FY2026) to identify which states had active detention facilities in ICE's own records. These statistics don't include hold rooms or short-term processing facilities. We classified states that appeared in all three years' statistics as continuously having long-term detention capacity over the two years we focused on. States that appeared in some but not all years — or in none of the three years' data — required additional research. For those states, we reviewed ICE's public detention facility locator, publicly released facility inspection reports and Intergovernmental Service Agreements and news stories to determine whether they had maintained facilities with longer-term detention capacity throughout the 2024 – 2026 period. States confirmed to have facility types with capacity for longer-term detention through this research were added to the "has long-term" list.
+We cross-referenced three years of ICE detention facility statistics (FY2024, FY2025, and FY2026) to identify which states had active detention facilities in ICE's own records. These statistics don't include hold rooms or short-term processing facilities. We classified states that appeared in all three years' statistics as continuously having long-term detention capacity over the two years we focused on. States that appeared in some but not all years — or in none of the three years' data — required additional research. For those states, we reviewed ICE's public detention facility locator, publicly released facility inspection reports and intergovernmental service agreements and news stories to determine whether they had maintained facilities with longer-term detention capacity throughout the 2024 – 26 period. States confirmed to have facility types with capacity for longer-term detention through this research were added to the "has long-term" list.
 
-We excluded hold rooms and processing facilities without beds from our definition of long-term detention, as these are designed for short-term stays only, not multi-day or multi-week detention. Through this process, we identified five states — Maryland, Oregon, Delaware, Illinois, and Connecticut — as having only short-term ICE detention facilities during the period covered by our analysis.
+We excluded hold rooms and processing facilities without beds from our definition of long-term detention, because these are designed for short-term stays only, not multi-day or multi-week detention. Through this process, we identified five states — Maryland, Oregon, Delaware, Illinois, and Connecticut — as having only short-term ICE detention facilities during the period covered by our analysis.
 
 ### Comparing states with and without long-term facilities
 
@@ -70,25 +70,25 @@ Because miles traveled is heavily right-skewed — most people travel between 0 
 
 We also tested a version of the model that included an interaction between facility type and administration, but found the interaction term was not statistically significant. We therefore used an additive model, which assumes the effect of administration is consistent across both facility types.
 
-The model's coefficient for short-term-only states can be interpreted as: people first detained in a short-term-only state traveled approximately exp(1.77) ≈ 6 times as many miles as those first detained in states with long-term facilities, after accounting for which administration was in power.
+The model's coefficient for short-term-only states can be interpreted as: People first detained in a short-term-only state traveled approximately exp(1.77) ≈ 6 times as many miles as those first detained in states with long-term facilities, after accounting for which administration was in power.
 
 <a id="limitations"></a>
 
-## Limitations 
+## Limitations {#limitations}
 
 -   **We calculated straight-line distances only:** We measured distance as the crow flies between facility coordinates — not actual travel routes. Real travel distances would likely be longer.
 
--   **We used available facility location data:** ICE doesn't maintain a public-facing list of all the detention facilities it holds people in, so we relied on lists compiled by The Deportation Data Project and The Vera Institute of Justice. We cross-checked several facility addresses, but were not able to confirm them all. Some facility locations may not be exact or up to date.
+-   **We used available facility location data:** ICE doesn't maintain a public-facing list of all its detention facilities, so we relied on lists compiled by the Deportation Data Project and The Vera Institute of Justice. We cross-checked several facility addresses but were not able to confirm them all. Some facility locations may not be exact or up to date.
 
--   **How we cleaned and deduplicated the data:** We flagged as duplicates cases where the same person was booked into the same facility within 24 hours of a prior booking at that facility, keeping only the later record (a spot check revealed the later record generally had updated entry and exit dates). The 24-hour window is a methodological choice based on the Deportation Data Project's deduplication guidelines; a different threshold would yield different results. Additionally, there are a number of records that show "Transferred" as a person's `detention_release_reason` with no corresponding second row at another facility. We identified some of these as likely miscodes — cases where someone was actually removed or otherwise exited ICE detention, but the release reason was incorrectly logged as a transfer. We replaced the `detention_release_reason` for any case where the person's *last* detention record is coded "Transferred," and the book-out date from that final facility matches both their overall detention book-out date and their departure date — indicating their ICE detention and their departure from the country ended on the same day. This definition likely does not capture all miscodes.
+-   **How we cleaned and deduplicated the data:** We flagged as duplicates cases where the same person was booked into the same facility within 24 hours of a prior booking at that facility, keeping only the later record (a spot check revealed the later record generally had updated entry and exit dates). The 24-hour window is a methodological choice based on the Deportation Data Project's deduplication guidelines; a different threshold would yield different results. Additionally, there are a number of records that show "Transferred" as a person's `detention_release_reason` with no corresponding second row at another facility. We identified some of these as likely miscodes — cases where someone was deported or otherwise exited ICE detention, but the release reason was incorrectly logged as a transfer. We replaced the `detention_release_reason` for any case where the person's *last* detention record is coded "Transferred," and the book-out date from that final facility matches both their overall detention book-out date and their departure date — indicating their ICE detention and their departure from the country ended on the same day. This definition likely does not capture all miscodes.
 
 -   **Short-term-only state classification required manual research.** The five-state list reflects both quantitative cross-referencing of ICE data and manual review of inspection reports, contracts, and news coverage. There is no definitive list of ICE facilities or their classifications across the nation, so our classification represents our research-based efforts to separate out states that have no facilities designed or authorized for multi-day ICE detention.
 
--   **ICE facility statistics pages are a snapshot, not a complete history.** The three fiscal-year statistics files reflect active facilities at a given point in time and may not capture every facility that briefly housed detainees during the period. We used them to identify states that we could be reasonably certain had at least one facility that could hold detained people for a multi-day span across the 2 years we analyzed.
+-   **ICE facility statistics pages are a snapshot, not a complete history.** The three fiscal-year statistics files reflect active facilities at a given time and may not capture every facility that housed detainees during the period. We used them to identify states we could be reasonably certain had at least one facility that could hold detained people for a multi-day span across the two years we analyzed.
 
 <a id="license"></a>
 
-## License 
+## License {#license}
 
 Copyright 2026, The Venetoulis Institute for Local Journalism
 

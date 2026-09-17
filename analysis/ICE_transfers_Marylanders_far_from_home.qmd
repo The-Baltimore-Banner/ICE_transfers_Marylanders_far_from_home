@@ -20,11 +20,10 @@ library(sf)
 library(mapview)
 library(readxl)
 library(arrow)
-library(duckdb)
-library(duckspatial)
 library(crsuggest)
 library(tidyverse)
-library(lmPerm)
+library(sfarrow)
+library(slider)
 
 select <- dplyr::select
 
@@ -115,7 +114,7 @@ facilities_joined <- facilities_new %>%
 
 
 # spatial file we created and saved because of time required 
-detentions_us_spatial <- st_read("data/output/detentions_us_spatial_final_0901.gpkg")
+detentions_us_spatial <- st_read("data/output/detentions_us_spatial_final_0916.gpkg")
   
 ```
 
@@ -137,11 +136,11 @@ detentions_cln <- detentions_all %>%
   # make clean date fields, minus time
     mutate(stay_book_in_date = date(stay_book_in_date_time),
     book_in_date = date(book_in_date_time)) %>% 
-  # Step 1: drop rows with no unique id
+  # Step 1: drop rows with no unique id - 10,918 rows
   filter(!is.na(anonymized_identifier)) %>% 
-  # Step 1.25: Drop rows from before where the data purportedly starts
+  # Step 1.25: Drop rows from before where the data purportedly starts - 782 rows 
   filter(stay_book_in_date >= as.Date("2021-10-01")) %>%
-  # Step 1.5: Drop exact duplicate rows (same person, check-in time, and facility).
+  # Step 1.5: Drop exact duplicate rows (same person, check-in time, and facility). - 49 rows
   distinct(anonymized_identifier, book_in_date_time, detention_facility, .keep_all=T) %>%
   # Step 2: Group by person and their overall stay start time, then sort by
   # individual book-in timestamps so lag() calculations work chronologically.
@@ -165,6 +164,7 @@ detentions_cln <- detentions_all %>%
     # is flagged as within_1day_same_facility). lead() looks forward one row.
     earlier_of_pair_flag = lead(within_1day_same_facility_flag, default = FALSE)
   ) %>%
+  # here, we lose 64,980 identified duplicate rows
   filter(!earlier_of_pair_flag) %>%
   ungroup() 
 
@@ -189,7 +189,7 @@ detentions_all_fac %>%
   ungroup() %>%
   nrow()
 
-# after this, there are 576 stays that have at least one row without a location, or 1643 total rows that will be kicked out for spatial analysis. That's less than 1% of the total # of rows we're working with. 
+# after this, there are 576 stays that have at least one row without a location, or 1,643 total rows that will be kicked out for spatial analysis. That's less than 1% of the total # of rows we're working with. 
 
 # okay, there are some miscodes in this data that we are aware of. We won't be able to fix them all, but maybe some. There's one in particular I'm attempting to fix: rows that should say 'removed' but say 'transferred' instead. Let's start by finding those:
 miscoded_transfers <- detentions_all_fac %>%
@@ -231,32 +231,18 @@ detentions_all_fac <- detentions_all_fac %>%
     ), .after = 'detention_release_reason'
   )
 
-# Final step, mostly for us to do spatial calculations using projection systems that account for the US + Hawaii only: let's filter out the handful of folks who did not start in a 
-# US state. 
+# Final step, mostly for us to do spatial calculations using projection systems that account for the US + Hawaii only: let's filter out the folks who didn't start in a US state. We'll also nix anyone who has a row that we can't tack a location to. 
 
 no_list <- c("GU", "MP", "VI", "PR")
 
-detentions_all_fac_grouped <- detentions_all_fac %>%
+detentions_all_fac_cln <- detentions_all_fac %>%
   group_by(anonymized_identifier, stay_book_in_date_time) %>% 
   arrange(anonymized_identifier, book_in_date_time) %>% 
-  slice_min(book_in_date_time, n = 1, with_ties = FALSE) %>%
-  ungroup() %>%
-  # no states that are not in the contiguous us 
-  filter(state %notin% no_list) %>%
-  # no starting in states we can't identify 
-  filter(!is.na(state)) 
-
-# this data has one row per person who started their detention in a US state. 
-detentions_all_fac_cln <- detentions_all_fac_grouped %>% 
-  select(anonymized_identifier, stay_book_in_date_time) %>% 
-  left_join(detentions_all_fac, by = c("anonymized_identifier", "stay_book_in_date_time"))
-
-# let's keep track of all the ids and stay book in date times of people who have a stop we can't geocode
-# before we do distance calculations, we'll have to kick these people out of the data
-# looks like 27 stays remain of the 576 we identified. These folks will leave us when we create our spatial dataframe in the next step! 
-no_location <- detentions_all_fac_cln %>%
-  filter(is.na(detention_facility_name)) %>%
-  distinct(anonymized_identifier, stay_book_in_date_time)
+  # minus 16,077 -- any detention that includes a non-us state 
+  filter(!any(state %in% no_list)) %>%
+  # minus 16,43 -- any detention with a state we cannot identify
+  filter(!any(is.na(state)))
+  
 
 ```
 
@@ -266,41 +252,36 @@ A spatial dataframe is pre-loaded because of the amount of time and memory resou
 
 ```{r}
 
-# detentions_us_spatial <- detentions_all_fac_cln %>%
-#   # getting number miles from first to next stop, etc.
-#   st_as_sf() %>%
-#   st_transform(5070) %>%
-#   # group by person and stay
-#   group_by(anonymized_identifier, stay_book_in_date_time) %>%
-#   # # arrange stints within stay
-#   arrange(anonymized_identifier, book_in_date_time) %>%
-#   # # take distance of one stint to the next
-#   mutate(
-#     geom_next = lead(geometry),
-#   )%>%
-#   ungroup()
-# 
-# # turn distance into a vector to make this run faster
-# detentions_us_spatial$distance_m <- st_distance(
-#   detentions_us_spatial$geometry,
-#   detentions_us_spatial$geom_next,
-#   by_element = TRUE
-# )
-# 
-# # multiply and turn into miles
-# detentions_us_spatial$distance_miles <- as.numeric(detentions_us_spatial$distance_m) * 0.000621371
-# # make sure all NAs are zeros
-# detentions_us_spatial$distance_miles[is.na(detentions_us_spatial$distance_miles)] <- 0
-# 
-# detentions_us_spatial_write <- detentions_us_spatial %>%
-#   select(-geom_next) %>%
-#   # removing the remaining folks who have a stint without a location
-#   anti_join(
-#     no_location,
-#     by = c("anonymized_identifier", "stay_book_in_date_time")
-#   )
-# 
-# st_write(detentions_us_spatial_write, "data/output/detentions_us_spatial_final_0916.gpkg")
+detentions_us_spatial <- detentions_all_fac_cln %>%
+  # getting number miles from first to next stop, etc.
+  st_as_sf() %>%
+  st_transform(5070) %>%
+  # group by person and stay
+  group_by(anonymized_identifier, stay_book_in_date_time) %>%
+  # # arrange stints within stay
+  arrange(anonymized_identifier, book_in_date_time) %>%
+  # # take distance of one stint to the next
+  mutate(
+    geom_next = lead(geometry),
+  )%>%
+  ungroup()
+
+# turn distance into a vector to make this run faster
+detentions_us_spatial$distance_m <- st_distance(
+  detentions_us_spatial$geometry,
+  detentions_us_spatial$geom_next,
+  by_element = TRUE
+)
+
+# multiply and turn into miles
+detentions_us_spatial$distance_miles <- as.numeric(detentions_us_spatial$distance_m) * 0.000621371
+# make sure all NAs are zeros
+detentions_us_spatial$distance_miles[is.na(detentions_us_spatial$distance_miles)] <- 0
+
+detentions_us_spatial_write <- detentions_us_spatial %>%
+  select(-geom_next)
+
+st_write(detentions_us_spatial_write, "data/output/detentions_us_spatial_final_0916.gpkg")
 
 ```
 
@@ -348,7 +329,7 @@ first_states_natl_grpd %>%
 
 ```{r}
 
-# step 1: make a df with one row per person first detained in Maryland with space 
+# step 1: make a df with just people first detained in MD 
  maryland_detentions_miles <- detentions_us_spatial %>%
   st_drop_geometry() %>% 
   group_by(anonymized_identifier, stay_book_in_date_time) %>%
@@ -356,9 +337,10 @@ first_states_natl_grpd %>%
   filter(first(detention_facility_code) %in% c("BALHOLD", "SALHOLD")) %>%
   ungroup()
 
+# step 2: look at Biden's last year in office 
 never_transf_biden <- maryland_detentions_miles %>%
   # filter to last year of Biden
-  filter(stay_book_in_date >= as_date("2024-01-20") & stay_book_in_date <= as_date("2025-01-19")) %>%
+  filter(stay_book_in_date >= as_date("2024-01-19") & stay_book_in_date <= as_date("2025-01-19")) %>%
   group_by(anonymized_identifier, stay_book_in_date_time, stay_release_reason) %>% 
   arrange(anonymized_identifier, book_in_date_time) %>%
   summarize(
@@ -529,7 +511,7 @@ States we're pretty sure there are only have short-term facilities (staging or h
 
 <!-- -->
 
--    Delaware - only the hold room
+-    Delaware - only the hold room in the data since 2022, no detention facility according to [this news story](https://whyy.org/articles/philadelphia-ice-agreements-287-suburbs-new-jersey-delaware/) and  [here](https://icetracking.org/#detention-centers) 
 
 <!-- -->
 
@@ -690,7 +672,7 @@ trump_transfers %>%
 
 man_18_stops <- detentions_us_spatial %>% 
   filter(anonymized_identifier == "f28050b1b43e2a0599964363e8e61a4a32e9515d") %>%
-  select(anonymized_identifier, stay_book_in_date_time, book_in_date_time, detention_facility, book_out_date_time, gender, citizenship_country, birth_year, detention_facility_name, address, state, distance_miles, geometry = geom) 
+  select(anonymized_identifier, stay_book_in_date_time, book_in_date_time, detention_facility, book_out_date_time, gender, citizenship_country, birth_year, detention_facility_name, address, state, distance_miles, geometry) 
 
 sum(man_18_stops$distance_miles)
 
